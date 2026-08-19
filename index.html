@@ -680,6 +680,18 @@
     to { transform: none; opacity: 1; }
   }
 
+  /* 音乐按钮播放时的脉冲光晕 */
+  #musicToggle.playing {
+    color: var(--gold);
+    border-color: var(--gold);
+    box-shadow: 0 0 16px var(--gold-soft);
+  }
+  #musicToggle.playing .ico { animation: musicPulse 2s ease-in-out infinite; }
+  @keyframes musicPulse {
+    0%, 100% { transform: scale(1); opacity: 1; }
+    50% { transform: scale(1.12); opacity: .85; }
+  }
+
   /* ============ 动效偏好 ============ */
   @media (prefers-reduced-motion: reduce) {
     html { scroll-behavior: auto; }
@@ -942,7 +954,9 @@ const ICONS = {
   check: '<path d="M20 6 9 17l-5-5"/>',
   menu: '<path d="M3 6h18M3 12h18M3 18h18"/>',
   calendar: '<rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/>',
-  chart: '<path d="M3 3v18h18"/><path d="M7 15v2M12 10v7M17 6v11"/>'
+  chart: '<path d="M3 3v18h18"/><path d="M7 15v2M12 10v7M17 6v11"/>',
+  music: '<path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/>',
+  musicOff: '<path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/><line x1="2" y1="2" x2="22" y2="22"/>'
 };
 function icon(name, size, cls) {
   const span = h('span', { class: 'ico' + (cls ? ' ' + cls : ''), 'aria-hidden': 'true' });
@@ -1139,6 +1153,7 @@ function renderNav() {
       h('nav', { class: 'nav-links', id: 'navLinks', 'aria-label': '页面导航' },
         NAV_LINKS.map(l => h('a', { href: '#' + l.id, 'data-target': l.id }, l.label))),
       h('div', { class: 'nav-actions' },
+        h('button', { class: 'icon-btn', id: 'musicToggle', type: 'button', 'aria-label': '播放背景音乐', title: '播放 / 暂停背景音乐' }, icon('music', 17)),
         h('button', { class: 'icon-btn', id: 'themeToggle', type: 'button', 'aria-label': '切换深浅色模式' }),
         h('button', { class: 'icon-btn', id: 'printBtn', type: 'button', 'aria-label': '打印 / 导出 PDF', title: '打印 / 导出 PDF' }, icon('printer', 17)),
         h('button', { class: 'icon-btn nav-toggle', id: 'navToggle', type: 'button', 'aria-label': '展开导航菜单' }, icon('menu', 18))
@@ -1188,10 +1203,218 @@ function renderNav() {
   /* 打印 */
   document.getElementById('printBtn').addEventListener('click', () => window.print());
 
+  /* 背景音乐 */
+  setupMusicToggle();
+
   /* 移动端菜单 */
   const navLinks = document.getElementById('navLinks');
   document.getElementById('navToggle').addEventListener('click', () => navLinks.classList.toggle('open'));
   navLinks.addEventListener('click', e => { if (e.target.tagName === 'A') navLinks.classList.remove('open'); });
+}
+
+/* ================================================================
+ * 背景音乐：Web Audio API 合成轻柔纯音乐
+ * 钢琴音色 arpeggio + 柔和 pad + 低频 bass，C 大调 70BPM
+ * ================================================================ */
+function setupMusicToggle() {
+  const btn = document.getElementById('musicToggle');
+  let ctx = null, masterGain = null, playing = false, schedulerId = null;
+  let nextNoteTime = 0, step = 0, autoStarted = false;
+
+  // C 大调音阶（Hz），从低到高
+  const SCALE = [
+    130.81, 146.83, 164.81, 174.61, 196.00, 220.00, 246.94,
+    261.63, 293.66, 329.63, 349.23, 392.00, 440.00, 493.88,
+    523.25, 587.33, 659.25
+  ];
+
+  // 和弦进行（C - G/B - Am - F），经典温柔走向
+  const CHORDS = [
+    { bass: 0,  notes: [7, 9, 11] },   // C
+    { bass: 6,  notes: [6, 9, 11] },   // G/B
+    { bass: 5,  notes: [8, 10, 12] },  // Am
+    { bass: 3,  notes: [7, 9, 12] }    // F
+  ];
+
+  // arpeggio 指法
+  const ARP_PATTERNS = [
+    [0, 1, 2, 1, 0, 1, 2, 1],
+    [0, 2, 1, 2, 0, 2, 1, 2],
+    [0, 1, 2, 1, 2, 1, 0, 1],
+    [0, 2, 0, 1, 2, 1, 0, 2]
+  ];
+
+  const BPM = 60;           // 更慢的节奏
+  const STEP_DUR = 60 / BPM / 2;
+
+  function init() {
+    ctx = new (window.AudioContext || window.webkitAudioContext)();
+    masterGain = ctx.createGain();
+    masterGain.gain.value = 0;
+    // 低通滤波器：让音色更柔和温暖
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = 1400;  // 截掉高频，更柔
+    filter.Q.value = 0.5;
+    // 延迟混响
+    const delay = ctx.createDelay();
+    delay.delayTime.value = 0.35;
+    const feedback = ctx.createGain();
+    feedback.gain.value = 0.28;
+    const wet = ctx.createGain();
+    wet.gain.value = 0.18;
+    delay.connect(feedback);
+    feedback.connect(delay);
+    masterGain.connect(filter);
+    filter.connect(ctx.destination);
+    masterGain.connect(delay);
+    delay.connect(wet);
+    wet.connect(filter);
+  }
+
+  // 合成钢琴音色：纯正弦波，极柔和起音
+  function playNote(freq, time, dur, vol) {
+    vol = vol || 0.5;
+    const osc = ctx.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.value = freq;
+
+    const gain = ctx.createGain();
+    // 更柔和的 ADSR：慢起音 + 长衰减
+    gain.gain.setValueAtTime(0, time);
+    gain.gain.linearRampToValueAtTime(vol, time + 0.08);     // 慢起音
+    gain.gain.exponentialRampToValueAtTime(vol * 0.3, time + dur * 0.5);
+    gain.gain.exponentialRampToValueAtTime(0.0001, time + dur);
+
+    osc.connect(gain);
+    gain.connect(masterGain);
+    osc.start(time);
+    osc.stop(time + dur + 0.1);
+  }
+
+  // 合成 pad 音色：长持续柔和弦乐
+  function playPad(freq, time, dur, vol) {
+    vol = vol || 0.12;
+    const osc = ctx.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.value = freq;
+    const lfo = ctx.createOscillator();
+    lfo.frequency.value = 3;       // 更慢的颤音
+    const lfoGain = ctx.createGain();
+    lfoGain.gain.value = 1.0;
+    lfo.connect(lfoGain);
+    lfoGain.connect(osc.frequency);
+
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0, time);
+    gain.gain.linearRampToValueAtTime(vol, time + 0.6);      // 更慢淡入
+    gain.gain.linearRampToValueAtTime(vol * 0.7, time + dur * 0.6);
+    gain.gain.linearRampToValueAtTime(0.0001, time + dur);
+
+    osc.connect(gain);
+    gain.connect(masterGain);
+    osc.start(time);
+    lfo.start(time);
+    osc.stop(time + dur + 0.1);
+    lfo.stop(time + dur + 0.1);
+  }
+
+  // 合成 bass 音色
+  function playBass(freq, time, dur, vol) {
+    vol = vol || 0.18;
+    const osc = ctx.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.value = freq;
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0, time);
+    gain.gain.linearRampToValueAtTime(vol, time + 0.05);
+    gain.gain.exponentialRampToValueAtTime(0.0001, time + dur);
+    osc.connect(gain);
+    gain.connect(masterGain);
+    osc.start(time);
+    osc.stop(time + dur + 0.1);
+  }
+
+  // 调度器
+  function scheduler() {
+    while (nextNoteTime < ctx.currentTime + 0.3) {
+      const chordIdx = Math.floor(step / 8) % CHORDS.length;
+      const chord = CHORDS[chordIdx];
+      const arpPat = ARP_PATTERNS[chordIdx];
+      const stepInChord = step % 8;
+
+      // arpeggio 音（降低音量）
+      const noteIdx = chord.notes[arpPat[stepInChord]];
+      playNote(SCALE[noteIdx], nextNoteTime, STEP_DUR * 2.2, 0.09);
+
+      // 每和弦第一拍：bass + pad
+      if (stepInChord === 0) {
+        playBass(SCALE[chord.bass], nextNoteTime, STEP_DUR * 8 * 0.95, 0.08);
+        chord.notes.forEach(n => {
+          playPad(SCALE[n], nextNoteTime, STEP_DUR * 8 * 0.98, 0.04);
+        });
+      }
+
+      nextNoteTime += STEP_DUR;
+      step++;
+    }
+    schedulerId = setTimeout(scheduler, 80);
+  }
+
+  function start() {
+    if (!ctx) init();
+    if (ctx.state === 'suspended') ctx.resume();
+    nextNoteTime = ctx.currentTime + 0.1;
+    step = 0;
+    // 淡入（更慢）
+    masterGain.gain.cancelScheduledValues(ctx.currentTime);
+    masterGain.gain.setValueAtTime(masterGain.gain.value, ctx.currentTime);
+    masterGain.gain.linearRampToValueAtTime(0.32, ctx.currentTime + 2.0);
+    scheduler();
+    playing = true;
+    btn.classList.add('playing');
+    btn.setAttribute('aria-label', '暂停背景音乐');
+    btn.replaceChildren(icon('music', 17));
+  }
+
+  function stop() {
+    if (schedulerId) { clearTimeout(schedulerId); schedulerId = null; }
+    if (ctx) {
+      masterGain.gain.cancelScheduledValues(ctx.currentTime);
+      masterGain.gain.setValueAtTime(masterGain.gain.value, ctx.currentTime);
+      masterGain.gain.linearRampToValueAtTime(0, ctx.currentTime + 0.8);
+    }
+    playing = false;
+    btn.classList.remove('playing');
+    btn.setAttribute('aria-label', '播放背景音乐');
+    btn.replaceChildren(icon('musicOff', 17));
+  }
+
+  btn.addEventListener('click', () => {
+    if (playing) stop(); else start();
+  });
+
+  // 自动播放：浏览器策略要求用户首次交互后才可播放音频
+  // 监听首次任意交互，自动开始播放
+  function tryAutoStart() {
+    if (!autoStarted) {
+      autoStarted = true;
+      start();
+    }
+  }
+  // 首次点击/按键/触摸时自动播放
+  ['click', 'keydown', 'touchstart'].forEach(evt => {
+    document.addEventListener(evt, tryAutoStart, { once: true, passive: true });
+  });
+  // 如果用户已交互过（如从其他标签回来），延迟尝试
+  if (document.hasFocus && document.hasFocus()) {
+    setTimeout(() => { if (!autoStarted) tryAutoStart(); }, 800);
+  }
+
+  // 页面失去焦点时暂停
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden && playing) stop();
+  });
 }
 
 /* ================================================================
